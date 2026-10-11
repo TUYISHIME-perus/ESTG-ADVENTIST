@@ -1,0 +1,10 @@
+/node_modules
+/server.js
+/.env
+/.admin-credentials.json
+/test
+/*.pdf
+/*.png
+/Seventh Day Adventist.jpg
+/package-lock.json
+/README.md

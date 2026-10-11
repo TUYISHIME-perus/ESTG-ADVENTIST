@@ -1,0 +1,5 @@
+node_modules/
+.admin-credentials.json
+.env
+.vercel/
+.netlify/
