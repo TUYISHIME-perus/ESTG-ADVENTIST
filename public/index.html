@@ -241,11 +241,16 @@
     
     </footer>
     <script>
-        const messageKey = "morningProgramDashboard";
         const messageElement = document.getElementById("home-message");
+        const photoWindow = document.getElementById("photo-window");
+        const imageTrack = document.querySelector(".photo-track");
+        const mediaError = document.getElementById("media-error");
         let homeMessages = [];
         let messageIndex = 0;
         let nextMessageTimer;
+        let slideIndex = 0;
+        let slideTimer;
+        let slideResetTimer;
 
         function displayHomeMessage() {
             window.clearTimeout(nextMessageTimer);
@@ -267,68 +272,7 @@
             }, 8000);
         }
 
-        function loadHomeMessages() {
-            try {
-                const saved = localStorage.getItem(messageKey);
-                const dashboard = saved ? JSON.parse(saved) : null;
-                const messages = dashboard && Array.isArray(dashboard.homeMessages)
-                    ? dashboard.homeMessages
-                    : [];
-                homeMessages = messages
-                    .filter(message => typeof message === "string")
-                    .map(message => message.trim())
-                    .filter(Boolean);
-                messageIndex = 0;
-                displayHomeMessage();
-            } catch (error) {
-                homeMessages = [];
-                messageElement.hidden = true;
-            }
-        }
-
-        window.addEventListener("storage", event => {
-            if (event.key === messageKey || event.key === null) {
-                loadHomeMessages();
-                loadHomePhotos();
-            } else if (event.key === "campusHomeMediaUpdated") {
-                loadHomePhotos();
-            }
-        });
-        loadHomeMessages();
-
-        const photoWindow = document.getElementById("photo-window");
-        const imageTrack = document.querySelector(".photo-track");
-        const mediaError = document.getElementById("media-error");
-        let slideIndex = 0;
-        let slideTimer;
-        let slideResetTimer;
-        let homeVideoUrl = "";
-
-        function openMediaDatabase() {
-            return new Promise((resolve, reject) => {
-                const request = indexedDB.open("campusHomeMedia", 1);
-                request.onupgradeneeded = () => request.result.createObjectStore("assets");
-                request.onsuccess = () => resolve(request.result);
-                request.onerror = () => reject(new Error("Unable to open browser media storage."));
-            });
-        }
-
-        async function readHomeVideo() {
-            const database = await openMediaDatabase();
-            return new Promise((resolve, reject) => {
-                const request = database.transaction("assets", "readonly").objectStore("assets").get("homeVideo");
-                request.onsuccess = () => {
-                    database.close();
-                    resolve(request.result || null);
-                };
-                request.onerror = () => {
-                    database.close();
-                    reject(new Error("Unable to load the home video from browser storage."));
-                };
-            });
-        }
-
-        async function loadHomePhotos() {
+        function renderMedia(photos, hasVideo) {
             window.clearInterval(slideTimer);
             window.clearTimeout(slideResetTimer);
             const oldVideo = imageTrack.querySelector("video");
@@ -343,103 +287,114 @@
             slideIndex = 0;
             mediaError.hidden = true;
 
-            try {
-                const saved = localStorage.getItem(messageKey);
-                const dashboard = saved ? JSON.parse(saved) : null;
-                const photos = dashboard && Array.isArray(dashboard.homePhotos)
-                    ? dashboard.homePhotos.filter(photo => typeof photo === "string" && photo.startsWith("data:image/"))
-                    : [];
-                photos.forEach((photo, index) => {
-                    const image = document.createElement("img");
-                    image.src = photo;
-                    image.alt = "Home photo " + (index + 1);
-                    imageTrack.appendChild(image);
+            photos.forEach((photo, index) => {
+                const image = document.createElement("img");
+                image.src = photo;
+                image.alt = "Home photo " + (index + 1);
+                imageTrack.appendChild(image);
+            });
+
+            let video = null;
+            if (hasVideo) {
+                video = document.createElement("video");
+                video.src = "/api/media/video";
+                video.autoplay = true;
+                video.muted = true;
+                video.controls = true;
+                video.playsInline = true;
+                video.preload = "auto";
+                video.setAttribute("aria-label", "Home page video");
+                imageTrack.appendChild(video);
+            }
+
+            photoWindow.hidden = photos.length === 0 && !video;
+            const slideCount = photos.length + (video ? 1 : 0);
+            if (video && photos.length === 0) {
+                video.play().catch(() => {
+                    mediaError.textContent = "Video autoplay was blocked. Press play on the video to start it.";
+                    mediaError.hidden = false;
                 });
-
-                const videoBlob = await readHomeVideo();
-                if (homeVideoUrl) URL.revokeObjectURL(homeVideoUrl);
-                homeVideoUrl = "";
-                let video = null;
-                if (videoBlob instanceof Blob && videoBlob.type.startsWith("video/")) {
-                    video = document.createElement("video");
-                    video.src = homeVideoUrl = URL.createObjectURL(videoBlob);
-                    video.autoplay = true;
-                    video.muted = true;
-                    video.controls = true;
-                    video.playsInline = true;
-                    video.preload = "auto";
-                    video.setAttribute("aria-label", "Home page video");
-                    imageTrack.appendChild(video);
+            } else if (slideCount > 1) {
+                if (!video) {
+                    const clone = imageTrack.firstElementChild.cloneNode();
+                    clone.alt = "Home photo slideshow";
+                    imageTrack.appendChild(clone);
                 }
+                const startPhotoTimer = () => {
+                    window.clearInterval(slideTimer);
+                    slideTimer = window.setInterval(() => {
+                        slideIndex += 1;
+                        imageTrack.style.transform = `translateX(-${slideIndex * 100}%)`;
 
-                photoWindow.hidden = photos.length === 0 && !video;
-                const slideCount = photos.length + (video ? 1 : 0);
-                if (video && photos.length === 0) {
-                    video.play().catch(() => {
-                        mediaError.textContent = "Video autoplay was blocked. Press play on the video to start it.";
-                        mediaError.hidden = false;
-                    });
-                } else if (slideCount > 1) {
-                    if (!video) {
-                        const clone = imageTrack.firstElementChild.cloneNode();
-                        clone.alt = "Home photo slideshow";
-                        imageTrack.appendChild(clone);
-                    }
-                    const startPhotoTimer = () => {
-                        window.clearInterval(slideTimer);
-                        slideTimer = window.setInterval(() => {
-                            slideIndex += 1;
-                            imageTrack.style.transform = `translateX(-${slideIndex * 100}%)`;
-
-                            if (video && slideIndex === photos.length) {
-                                window.clearInterval(slideTimer);
-                                slideResetTimer = window.setTimeout(() => {
-                                    video.play().catch(() => {
-                                        mediaError.textContent = "Video autoplay was blocked. Press play on the video to start it.";
-                                        mediaError.hidden = false;
-                                    });
-                                }, 1000);
-                            } else if (!video && slideIndex === photos.length) {
-                                slideResetTimer = window.setTimeout(() => {
-                                    imageTrack.style.transition = "none";
-                                    imageTrack.style.transform = "translateX(0)";
-                                    slideIndex = 0;
-                                    requestAnimationFrame(() => requestAnimationFrame(() => {
-                                        imageTrack.style.transition = "";
-                                    }));
-                                }, 1000);
-                            }
-                        }, 10000);
-                    };
-                    startPhotoTimer();
-                    if (video && photos.length) {
-                        video.addEventListener("ended", () => {
-                            video.pause();
-                            video.currentTime = 0;
-                            imageTrack.style.transition = "none";
-                            imageTrack.style.transform = "translateX(0)";
-                            slideIndex = 0;
-                            requestAnimationFrame(() => requestAnimationFrame(() => {
-                                imageTrack.style.transition = "";
-                                startPhotoTimer();
-                            }));
-                        });
-                    }
-                }
-                if (video) {
-                    video.addEventListener("error", () => {
-                        mediaError.textContent = "The saved home video could not be played in this browser.";
-                        mediaError.hidden = false;
+                        if (video && slideIndex === photos.length) {
+                            window.clearInterval(slideTimer);
+                            slideResetTimer = window.setTimeout(() => {
+                                video.play().catch(() => {
+                                    mediaError.textContent = "Video autoplay was blocked. Press play on the video to start it.";
+                                    mediaError.hidden = false;
+                                });
+                            }, 1000);
+                        } else if (!video && slideIndex === photos.length) {
+                            slideResetTimer = window.setTimeout(() => {
+                                imageTrack.style.transition = "none";
+                                imageTrack.style.transform = "translateX(0)";
+                                slideIndex = 0;
+                                requestAnimationFrame(() => requestAnimationFrame(() => {
+                                    imageTrack.style.transition = "";
+                                }));
+                            }, 1000);
+                        }
+                    }, 10000);
+                };
+                startPhotoTimer();
+                if (video && photos.length) {
+                    video.addEventListener("ended", () => {
+                        video.pause();
+                        video.currentTime = 0;
+                        imageTrack.style.transition = "none";
+                        imageTrack.style.transform = "translateX(0)";
+                        slideIndex = 0;
+                        requestAnimationFrame(() => requestAnimationFrame(() => {
+                            imageTrack.style.transition = "";
+                            startPhotoTimer();
+                        }));
                     });
                 }
+            }
+            if (video) {
+                video.addEventListener("error", () => {
+                    mediaError.textContent = "The saved home video could not be played in this browser.";
+                    mediaError.hidden = false;
+                });
+            }
+        }
+
+        async function loadHome() {
+            try {
+                const response = await fetch("/api/home", { credentials: "same-origin" });
+                if (!response.ok) throw new Error("Unable to load home page content.");
+                const data = await response.json();
+
+                homeMessages = (Array.isArray(data.homeMessages) ? data.homeMessages : [])
+                    .filter(message => typeof message === "string")
+                    .map(message => message.trim())
+                    .filter(Boolean);
+                messageIndex = 0;
+                displayHomeMessage();
+
+                const photos = (Array.isArray(data.homePhotos) ? data.homePhotos : [])
+                    .filter(photo => typeof photo === "string" && photo.startsWith("data:image/"));
+                renderMedia(photos, Boolean(data.hasVideo));
             } catch (error) {
+                homeMessages = [];
+                messageElement.hidden = true;
                 photoWindow.hidden = true;
-                mediaError.textContent = error.message || "Unable to load home page media.";
+                mediaError.textContent = error.message || "Unable to load home page content.";
                 mediaError.hidden = false;
             }
         }
 
-        loadHomePhotos();
+        loadHome();
     </script>
 </body>
 </html>

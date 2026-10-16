@@ -193,7 +193,6 @@
         <p id="message" aria-live="polite">Loading morning programs...</p>
     </section>
     <script>
-        const storageKey = "morningProgramDashboard";
         const rows = document.getElementById("program-rows");
         const message = document.getElementById("message");
         const dateFilter = document.getElementById("date-filter");
@@ -201,32 +200,31 @@
         let programs = [];
 
         function loadPrograms() {
-            try {
-                const saved = localStorage.getItem(storageKey);
-                if (!saved) {
-                    programs = [];
+            fetch("/api/content", { credentials: "same-origin" })
+                .then(response => {
+                    if (!response.ok) throw new Error("Unable to read dashboard data.");
+                    return response.json();
+                })
+                .then(dashboard => {
+                    const entries = dashboard && dashboard.data && Array.isArray(dashboard.data.morning)
+                        ? dashboard.data.morning
+                        : dashboard && Array.isArray(dashboard.entries)
+                            ? dashboard.entries
+                            : [];
+                    programs = entries.filter(program =>
+                        program && typeof program === "object" &&
+                        typeof program.leader === "string" &&
+                        typeof program.date === "string" &&
+                        typeof program.preacher === "string"
+                    );
                     renderPrograms();
-                    return;
-                }
-                const dashboard = JSON.parse(saved);
-                const entries = dashboard && dashboard.data && Array.isArray(dashboard.data.morning)
-                    ? dashboard.data.morning
-                    : dashboard && Array.isArray(dashboard.entries)
-                        ? dashboard.entries
-                        : [];
-                programs = entries.filter(program =>
-                    program && typeof program === "object" &&
-                    typeof program.leader === "string" &&
-                    typeof program.date === "string" &&
-                    typeof program.preacher === "string"
-                );
-                renderPrograms();
-            } catch (error) {
-                programs = [];
-                rows.replaceChildren();
-                message.className = "error";
-                message.textContent = "Unable to read saved morning programs. Check browser storage and dashboard data, then reload this page.";
-            }
+                })
+                .catch(error => {
+                    programs = [];
+                    rows.replaceChildren();
+                    message.className = "error";
+                    message.textContent = "Unable to read saved morning programs. Check the dashboard data and reload this page.";
+                });
         }
 
         function renderPrograms() {
@@ -258,9 +256,6 @@
 
         dateFilter.addEventListener("input", renderPrograms);
         preacherFilter.addEventListener("input", renderPrograms);
-        window.addEventListener("storage", event => {
-            if (event.key === storageKey || event.key === null) loadPrograms();
-        });
 
         loadPrograms();
     </script>

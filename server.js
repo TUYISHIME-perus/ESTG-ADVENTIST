@@ -2,11 +2,15 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
+const { openDatabase } = require("./db");
 
 const ROOT = path.join(__dirname, "public");
 const SESSION_COOKIE = "campus_session";
 const SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
 const MAX_REQUEST_BYTES = 8192;
+const MAX_CONTENT_BYTES = 32 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
+const DEFAULT_DB_PATH = path.join(__dirname, "data", "church.db");
 const PROTECTED_PAGES = new Set(["program-dashboard.html", "preachers.html"]);
 const MIME_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -33,28 +37,35 @@ function verifyPassword(password, record) {
   return expected.length === actual.length && crypto.timingSafeEqual(actual, expected);
 }
 
-function readJson(request) {
+function readBody(request, maxBytes) {
   return new Promise((resolve, reject) => {
-    let body = "";
+    const chunks = [];
+    let size = 0;
     let tooLarge = false;
-    request.setEncoding("utf8");
     request.on("data", chunk => {
       if (tooLarge) return;
-      body += chunk;
-      if (Buffer.byteLength(body, "utf8") > MAX_REQUEST_BYTES) {
+      size += chunk.length;
+      if (size > maxBytes) {
         tooLarge = true;
         reject(Object.assign(new Error("Request is too large."), { statusCode: 413 }));
+        return;
       }
+      chunks.push(chunk);
     });
     request.on("end", () => {
-      if (tooLarge) return;
-      try {
-        resolve(JSON.parse(body));
-      } catch {
-        reject(Object.assign(new Error("Send a valid JSON request."), { statusCode: 400 }));
-      }
+      if (!tooLarge) resolve(Buffer.concat(chunks));
     });
     request.on("error", reject);
+  });
+}
+
+function readJson(request, maxBytes = MAX_REQUEST_BYTES) {
+  return readBody(request, maxBytes).then(body => {
+    try {
+      return JSON.parse(body.toString("utf8"));
+    } catch {
+      throw Object.assign(new Error("Send a valid JSON request."), { statusCode: 400 });
+    }
   });
 }
 
@@ -67,6 +78,37 @@ function sendJson(response, statusCode, payload, headers = {}) {
   response.end(JSON.stringify(payload));
 }
 
+function sendMedia(request, response, media) {
+  const data = media.data;
+  const headers = {
+    "Content-Type": media.contentType || "application/octet-stream",
+    "Cache-Control": "no-store",
+    "Accept-Ranges": "bytes"
+  };
+  const range = request.headers.range;
+  if (range) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+    if (match && (match[1] || match[2])) {
+      const start = match[1] ? Number(match[1]) : 0;
+      const end = match[2] ? Math.min(Number(match[2]), data.length - 1) : data.length - 1;
+      if (start > end || start >= data.length) {
+        response.writeHead(416, { "Content-Range": `bytes */${data.length}` }).end();
+        return;
+      }
+      const chunk = data.subarray(start, end + 1);
+      response.writeHead(206, {
+        ...headers,
+        "Content-Range": `bytes ${start}-${end}/${data.length}`,
+        "Content-Length": chunk.length
+      });
+      response.end(request.method === "HEAD" ? undefined : chunk);
+      return;
+    }
+  }
+  response.writeHead(200, { ...headers, "Content-Length": data.length });
+  response.end(request.method === "HEAD" ? undefined : data);
+}
+
 function cookieValue(request, name) {
   const cookies = (request.headers.cookie || "").split(";");
   const item = cookies.map(cookie => cookie.trim()).find(cookie => cookie.startsWith(name + "="));
@@ -76,8 +118,7 @@ function cookieValue(request, name) {
 function createAppServer(options = {}) {
   const adminEmail = options.adminEmail || process.env.ADMIN_EMAIL;
   const initialPassword = options.adminPassword || process.env.ADMIN_PASSWORD;
-  const authStorePath = options.authStorePath || process.env.AUTH_STORE_PATH ||
-    path.join(__dirname, ".admin-credentials.json");
+  const dbPath = options.dbPath || process.env.DATABASE_PATH || DEFAULT_DB_PATH;
   const trustProxy = options.trustProxy === undefined
     ? process.env.TRUST_PROXY === "true"
     : options.trustProxy;
@@ -89,25 +130,31 @@ function createAppServer(options = {}) {
     throw new Error("Set ADMIN_EMAIL before starting the site.");
   }
 
-  let credentials = { email: adminEmail.trim().toLowerCase() };
-  if (fs.existsSync(authStorePath)) {
-    const saved = JSON.parse(fs.readFileSync(authStorePath, "utf8"));
-    if (typeof saved.salt !== "string" || typeof saved.hash !== "string" ||
-        !/^[0-9a-f]+$/i.test(saved.salt) || !/^[0-9a-f]+$/i.test(saved.hash)) {
+  const database = options.database || openDatabase(dbPath);
+  const ownsDatabase = !options.database;
+
+  const savedAuth = database.getAuth();
+  if (savedAuth) {
+    if (typeof savedAuth.salt !== "string" || typeof savedAuth.hash !== "string" ||
+        !/^[0-9a-f]+$/i.test(savedAuth.salt) || !/^[0-9a-f]+$/i.test(savedAuth.hash)) {
       throw new Error("The saved administrator credential record is invalid.");
     }
-    credentials = { ...credentials, salt: saved.salt, hash: saved.hash };
   } else {
     if (!initialPassword) {
       throw new Error("Set ADMIN_PASSWORD for the first server start.");
     }
-    credentials = { ...credentials, ...passwordRecord(initialPassword) };
-    fs.mkdirSync(path.dirname(authStorePath), { recursive: true });
-    fs.writeFileSync(authStorePath, JSON.stringify({
-      salt: credentials.salt,
-      hash: credentials.hash
-    }), { mode: 0o600 });
+    database.setAuth({
+      email: adminEmail.trim().toLowerCase(),
+      ...passwordRecord(initialPassword)
+    });
   }
+
+  const storedAuth = savedAuth || database.getAuth();
+  let credentials = {
+    email: storedAuth.email.trim().toLowerCase(),
+    salt: storedAuth.salt,
+    hash: storedAuth.hash
+  };
 
   const sessions = new Map();
   const loginAttempts = new Map();
@@ -146,22 +193,110 @@ function createAppServer(options = {}) {
   }
 
   function handleApi(request, response, url) {
-    if (request.method === "GET" && url.pathname === "/api/session") {
+    const pathname = url.pathname;
+    const method = request.method;
+
+    if (method === "GET" && pathname === "/api/session") {
       sendJson(response, 200, { authenticated: Boolean(sessionFor(request)) });
       return true;
     }
 
-    if (request.method !== "POST" || !["/api/login", "/api/logout", "/api/change-password"].includes(url.pathname)) {
+    if (method === "GET" && pathname === "/api/home") {
+      const content = database.getContent() || {};
+      sendJson(response, 200, {
+        title: typeof content.title === "string" ? content.title : "",
+        homeMessages: Array.isArray(content.homeMessages) ? content.homeMessages : [],
+        homePhotos: Array.isArray(content.homePhotos) ? content.homePhotos : [],
+        hasVideo: Boolean(database.getMedia("homeVideo"))
+      });
+      return true;
+    }
+
+    if ((method === "GET" || method === "HEAD") && pathname === "/api/media/video") {
+      const media = database.getMedia("homeVideo");
+      if (!media) {
+        sendJson(response, 404, { error: "No home video has been uploaded." });
+        return true;
+      }
+      sendMedia(request, response, media);
+      return true;
+    }
+
+    if (method === "GET" && pathname === "/api/content") {
+      if (!sessionFor(request)) {
+        sendJson(response, 401, { error: "Sign in to view the dashboard data." });
+        return true;
+      }
+      sendJson(response, 200, database.getContent() || {});
+      return true;
+    }
+
+    if (method !== "POST" && method !== "PUT" && method !== "DELETE") return false;
+    if (!["/api/login", "/api/logout", "/api/change-password", "/api/content", "/api/media/video"].includes(pathname)) {
       return false;
     }
     if (!sameOrigin(request)) {
       sendJson(response, 403, { error: "Request origin was not accepted." });
       return true;
     }
-    if (url.pathname === "/api/logout") {
+    if (pathname === "/api/logout") {
       const token = cookieValue(request, SESSION_COOKIE);
       sessions.delete(token);
       sendJson(response, 200, { ok: true }, { "Set-Cookie": sessionCookie("", 0) });
+      return true;
+    }
+
+    function failRequest(error) {
+      if (response.headersSent || response.destroyed) return;
+      sendJson(response, error.statusCode || 500, {
+        error: error.statusCode ? error.message : "Unable to process the request."
+      });
+      if (!error.statusCode) console.error("API request failed:", error);
+    }
+
+    if (pathname === "/api/content") {
+      if (method !== "PUT") {
+        response.writeHead(405, { Allow: "GET, PUT" }).end("Method not allowed.");
+        return true;
+      }
+      if (!sessionFor(request)) {
+        sendJson(response, 401, { error: "Sign in to save the dashboard data." });
+        return true;
+      }
+      readJson(request, MAX_CONTENT_BYTES).then(data => {
+        if (!data || typeof data !== "object" || Array.isArray(data)) {
+          sendJson(response, 400, { error: "Send valid dashboard data." });
+          return;
+        }
+        database.setContent(data);
+        sendJson(response, 200, { ok: true });
+      }).catch(failRequest);
+      return true;
+    }
+
+    if (pathname === "/api/media/video") {
+      if (!sessionFor(request)) {
+        sendJson(response, 401, { error: "Sign in to change the home video." });
+        return true;
+      }
+      if (method === "DELETE") {
+        database.deleteMedia("homeVideo");
+        sendJson(response, 200, { ok: true });
+        return true;
+      }
+      const contentType = String(request.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+      readBody(request, MAX_VIDEO_BYTES).then(body => {
+        if (!contentType.startsWith("video/")) {
+          sendJson(response, 400, { error: "Upload a supported video file." });
+          return;
+        }
+        if (!body.length) {
+          sendJson(response, 400, { error: "Choose a video before saving." });
+          return;
+        }
+        database.setMedia("homeVideo", contentType, body);
+        sendJson(response, 200, { ok: true });
+      }).catch(failRequest);
       return true;
     }
 
@@ -171,7 +306,7 @@ function createAppServer(options = {}) {
         return;
       }
 
-      if (url.pathname === "/api/login") {
+      if (pathname === "/api/login") {
         const address = clientAddress(request);
         const attempts = loginAttempts.get(address) || { count: 0, resetAt: Date.now() + 15 * 60 * 1000 };
         if (attempts.resetAt <= Date.now()) {
@@ -221,25 +356,19 @@ function createAppServer(options = {}) {
         email: credentials.email,
         ...passwordRecord(newPassword)
       };
-      fs.mkdirSync(path.dirname(authStorePath), { recursive: true });
-      fs.writeFileSync(authStorePath, JSON.stringify({
+      database.setAuth({
+        email: nextCredentials.email,
         salt: nextCredentials.salt,
         hash: nextCredentials.hash
-      }), { mode: 0o600 });
+      });
       credentials = nextCredentials;
       sessions.clear();
       sendJson(response, 200, { ok: true }, { "Set-Cookie": sessionCookie("", 0) });
-    }).catch(error => {
-      if (response.headersSent || response.destroyed) return;
-      sendJson(response, error.statusCode || 500, {
-        error: error.statusCode ? error.message : "Unable to process the request."
-      });
-      if (!error.statusCode) console.error("Authentication request failed:", error);
-    });
+    }).catch(failRequest);
     return true;
   }
 
-  return http.createServer((request, response) => {
+  const server = http.createServer((request, response) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "same-origin");
     response.setHeader("X-Frame-Options", "DENY");
@@ -315,6 +444,13 @@ function createAppServer(options = {}) {
       response.end(request.method === "HEAD" ? undefined : contents);
     });
   });
+
+  if (ownsDatabase) {
+    server.on("close", () => database.close());
+  }
+  server.database = database;
+
+  return server;
 }
 
 if (require.main === module) {

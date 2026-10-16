@@ -1,5 +1,9 @@
 node_modules/
 .admin-credentials.json
+data/
+*.db
+*.db-wal
+*.db-shm
 .env
 .vercel/
 .netlify/

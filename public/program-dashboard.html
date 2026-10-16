@@ -223,8 +223,7 @@
 
 <script src="auth.js"></script>
 <script>
-  // Each dashboard file needs its own KEY so saved data never mixes.
-  const KEY = "morningProgramDashboard";
+  // Dashboard content is stored in the server database and loaded through /api/content.
 
   if (!window.CampusAuth || !CampusAuth.requireSession()) {
     // Redirecting to the login page; stop the rest of the dashboard from running.
@@ -321,36 +320,58 @@
       }));
   }
   function load() {
-    try {
-      const saved = localStorage.getItem(KEY);
-      if (saved) normalize(JSON.parse(saved));
-    } catch (e) {
-      setStatus("Unable to read saved dashboard data.", "bad");
-    }
-    state.weeklyStudies.forEach((teacher, index) => {
-      $("weeklyTeacher" + (index + 1)).value = teacher;
-    });
-    $("homeMessageOne").value = state.homeMessages[0];
-    $("homeMessageTwo").value = state.homeMessages[1];
-    state.homePhotos.forEach((photo, index) => {
-      const preview = $("homePhotoPreview" + ["One", "Two", "Three"][index]);
-      preview.src = photo;
-      preview.hidden = !photo;
-    });
+    return fetch("/api/content", { credentials: "same-origin" })
+      .then(response => {
+        if (response.status === 401) {
+          window.location.assign("admin.html?returnTo=program-dashboard.html");
+          throw new Error("Authentication required.");
+        }
+        if (!response.ok) throw new Error("Unable to read saved dashboard data.");
+        return response.json();
+      })
+      .then(saved => {
+        if (saved && typeof saved === "object" && !Array.isArray(saved) && Object.keys(saved).length) {
+          normalize(saved);
+        }
+      })
+      .catch(error => {
+        setStatus(error.message || "Unable to read saved dashboard data.", "bad");
+      })
+      .then(() => {
+        state.weeklyStudies.forEach((teacher, index) => {
+          $("weeklyTeacher" + (index + 1)).value = teacher;
+        });
+        $("homeMessageOne").value = state.homeMessages[0];
+        $("homeMessageTwo").value = state.homeMessages[1];
+        state.homePhotos.forEach((photo, index) => {
+          const preview = $("homePhotoPreview" + ["One", "Two", "Three"][index]);
+          preview.src = photo;
+          preview.hidden = !photo;
+        });
+      });
   }
-  function save() {
+  async function save() {
     try {
-      localStorage.setItem(KEY, JSON.stringify(state));
+      const response = await fetch("/api/content", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(state)
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "Unable to save the dashboard data.");
+      }
       setStatus("Saved " + new Date().toLocaleTimeString(), "ok");
       return true;
-    } catch (e) {
-      setStatus('Browser storage is full or unavailable. Use "Save now" to download your dashboard data.', "bad");
+    } catch (error) {
+      setStatus(error.message || "Unable to save the dashboard data.", "bad");
       return false;
     }
   }
-  // "Save now": saves in the browser; if that is blocked, downloads a data file instead.
-  $("saveNow").onclick = () => {
-    if (save()) return;
+  // "Save now": saves to the server; if that fails, downloads a data file instead.
+  $("saveNow").onclick = async () => {
+    if (await save()) return;
     $("exportBtn").click();
   };
   $("homeMessagesForm").addEventListener("submit", event => {
@@ -405,70 +426,18 @@
       setStatus(error.message || "Unable to process the selected photos.", "bad");
     }
   });
-  const MEDIA_DB = "campusHomeMedia";
-  const MEDIA_STORE = "assets";
   let dashboardVideoUrl = "";
-  function openMediaDatabase() {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open(MEDIA_DB, 1);
-      request.onupgradeneeded = () => request.result.createObjectStore(MEDIA_STORE);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(new Error("Unable to open browser media storage."));
-    });
-  }
-  async function readStoredVideo() {
-    const db = await openMediaDatabase();
-    return new Promise((resolve, reject) => {
-      const request = db.transaction(MEDIA_STORE, "readonly").objectStore(MEDIA_STORE).get("homeVideo");
-      request.onsuccess = () => {
-        db.close();
-        resolve(request.result || null);
-      };
-      request.onerror = () => {
-        db.close();
-        reject(new Error("Unable to load the saved home video."));
-      };
-    });
-  }
-  async function writeStoredVideo(video) {
-    const db = await openMediaDatabase();
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction(MEDIA_STORE, "readwrite");
-      if (video) transaction.objectStore(MEDIA_STORE).put(video, "homeVideo");
-      else transaction.objectStore(MEDIA_STORE).delete("homeVideo");
-      transaction.oncomplete = () => {
-        db.close();
-        resolve();
-      };
-      transaction.onerror = () => {
-        db.close();
-        reject(new Error("Unable to save the video. Browser storage may be full or unavailable."));
-      };
-      transaction.onabort = () => {
-        db.close();
-        reject(new Error("Saving the video was cancelled. Browser storage may be full or unavailable."));
-      };
-    });
-  }
-  function notifyHomeVideoChange() {
-    try {
-      localStorage.setItem("campusHomeMediaUpdated", String(Date.now()));
-      return true;
-    } catch (error) {
-      return false;
-    }
-  }
   async function showStoredDashboardVideo() {
+    const preview = $("homeVideoPreview");
     try {
-      const video = await readStoredVideo();
-      const preview = $("homeVideoPreview");
-      if (dashboardVideoUrl) URL.revokeObjectURL(dashboardVideoUrl);
-      dashboardVideoUrl = video ? URL.createObjectURL(video) : "";
-      preview.hidden = !video;
-      if (video) preview.src = dashboardVideoUrl;
+      const response = await fetch("/api/media/video", { method: "HEAD", credentials: "same-origin" });
+      const hasVideo = response.ok;
+      if (dashboardVideoUrl) { URL.revokeObjectURL(dashboardVideoUrl); dashboardVideoUrl = ""; }
+      preview.hidden = !hasVideo;
+      if (hasVideo) preview.src = "/api/media/video?v=" + Date.now();
       else preview.removeAttribute("src");
     } catch (error) {
-      setStatus(error.message, "bad");
+      setStatus("Unable to load the saved home video.", "bad");
     }
   }
   $("homeVideoForm").addEventListener("submit", async event => {
@@ -483,30 +452,37 @@
       return;
     }
     try {
-      await writeStoredVideo(video);
+      const response = await fetch("/api/media/video", {
+        method: "PUT",
+        headers: { "Content-Type": video.type },
+        credentials: "same-origin",
+        body: video
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "Unable to save the video.");
+      }
       $("homeVideoFile").value = "";
       await showStoredDashboardVideo();
-      const notified = notifyHomeVideoChange();
-      setStatus(
-        notified ? "Saved home video without recompression." : "Video saved. Reload the home page to display it.",
-        notified ? "ok" : "bad"
-      );
+      setStatus("Saved home video without recompression.", "ok");
     } catch (error) {
       setStatus(error.message, "bad");
     }
   });
   $("removeHomeVideo").addEventListener("click", async () => {
     try {
-      await writeStoredVideo(null);
+      const response = await fetch("/api/media/video", { method: "DELETE", credentials: "same-origin" });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "Unable to remove the video.");
+      }
       $("homeVideoFile").value = "";
       await showStoredDashboardVideo();
-      const notified = notifyHomeVideoChange();
-      setStatus(notified ? "Removed home video." : "Video removed. Reload the home page to apply the change.", notified ? "ok" : "bad");
+      setStatus("Removed home video.", "ok");
     } catch (error) {
       setStatus(error.message, "bad");
     }
   });
-  showStoredDashboardVideo();
 
   // ---- building the page ----
   function buildTabs() {
@@ -676,10 +652,13 @@
     ev.target.value = "";
   };
 
-  load();
   render();
-  const total = Object.values(state.data).reduce((n, a) => n + a.length, 0);
-  if (total) setStatus("Loaded " + total + " saved entries", "ok");
+  load().then(() => {
+    render();
+    showStoredDashboardVideo();
+    const total = Object.values(state.data).reduce((n, a) => n + a.length, 0);
+    if (total) setStatus("Loaded " + total + " saved entries", "ok");
+  });
 </script>
 </body>
 </html>

@@ -5,15 +5,16 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { after, before, test } = require("node:test");
 const { createAppServer } = require("../server");
+const { openDatabase } = require("../db");
 
 const originalPassword = "original-test-password";
 const replacementPassword = "replacement-test-password";
 const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "campus-auth-"));
-const authStorePath = path.join(temporaryDirectory, "credentials.json");
+const dbPath = path.join(temporaryDirectory, "church.db");
 const server = createAppServer({
   adminEmail: "admin@example.com",
   adminPassword: originalPassword,
-  authStorePath
+  dbPath
 });
 let baseUrl;
 
@@ -40,8 +41,10 @@ async function post(pathname, details, cookie) {
 }
 
 test("protected pages are served only after server-side login", async () => {
-  const initialRecord = fs.readFileSync(authStorePath, "utf8");
-  assert.equal(initialRecord.includes(originalPassword), false);
+  const probe = openDatabase(dbPath);
+  const stored = probe.getAuth();
+  probe.close();
+  assert.equal(stored.hash.includes(originalPassword), false);
 
   const blocked = await fetch(baseUrl + "/program-dashboard.html", { redirect: "manual" });
   assert.equal(blocked.status, 302);
@@ -81,13 +84,15 @@ test("password changes save only a password hash and invalidate sessions", async
   }, cookie);
   assert.equal(change.status, 200);
 
-  const savedRecord = fs.readFileSync(authStorePath, "utf8");
-  assert.equal(savedRecord.includes(originalPassword), false);
-  assert.equal(savedRecord.includes(replacementPassword), false);
-  assert.doesNotThrow(() => createAppServer({
-    adminEmail: "admin@example.com",
-    authStorePath
-  }));
+  const probe = openDatabase(dbPath);
+  const stored = probe.getAuth();
+  probe.close();
+  assert.equal(stored.hash.includes(originalPassword), false);
+  assert.equal(stored.hash.includes(replacementPassword), false);
+  assert.doesNotThrow(() => {
+    const reopened = createAppServer({ adminEmail: "admin@example.com", dbPath });
+    reopened.database.close();
+  });
 
   const oldLogin = await post("/api/login", {
     email: "admin@example.com",
@@ -101,11 +106,79 @@ test("password changes save only a password hash and invalidate sessions", async
   assert.equal(newLogin.status, 200);
 });
 
-test("server implementation and credential files are not publicly served", async () => {
+test("dashboard content and home media persist in the database", async () => {
+  const login = await post("/api/login", {
+    email: "admin@example.com",
+    password: replacementPassword
+  });
+  const cookie = login.headers.get("set-cookie").split(";")[0];
+
+  const dashboard = {
+    title: "Test dashboard",
+    names: {},
+    weeklyStudies: ["First", "", "", "", "", ""],
+    homeMessages: ["Welcome", "Peace"],
+    homePhotos: [],
+    data: {
+      morning: [{ id: "1", leader: "James", date: "2026-10-14", preacher: "Peter" }],
+      worship: [],
+      sabbath: []
+    }
+  };
+
+  const unauthorized = await fetch(baseUrl + "/api/content", {
+    method: "PUT",
+    headers: { Origin: baseUrl, "Content-Type": "application/json" },
+    body: JSON.stringify(dashboard)
+  });
+  assert.equal(unauthorized.status, 401);
+
+  const saved = await fetch(baseUrl + "/api/content", {
+    method: "PUT",
+    headers: { Origin: baseUrl, "Content-Type": "application/json", Cookie: cookie },
+    body: JSON.stringify(dashboard)
+  });
+  assert.equal(saved.status, 200);
+
+  const loaded = await fetch(baseUrl + "/api/content", { headers: { Cookie: cookie } });
+  assert.equal(loaded.status, 200);
+  assert.deepEqual(await loaded.json(), dashboard);
+
+  const home = await (await fetch(baseUrl + "/api/home")).json();
+  assert.deepEqual(home.homeMessages, ["Welcome", "Peace"]);
+  assert.equal(home.hasVideo, false);
+
+  const upload = await fetch(baseUrl + "/api/media/video", {
+    method: "PUT",
+    headers: { Origin: baseUrl, "Content-Type": "video/mp4", Cookie: cookie },
+    body: Buffer.from("fake-video-bytes")
+  });
+  assert.equal(upload.status, 200);
+
+  const video = await fetch(baseUrl + "/api/media/video");
+  assert.equal(video.status, 200);
+  assert.match(video.headers.get("content-type"), /^video\/mp4/);
+  assert.equal(Buffer.from(await video.arrayBuffer()).toString(), "fake-video-bytes");
+
+  const head = await fetch(baseUrl + "/api/media/video", { method: "HEAD" });
+  assert.equal(head.status, 200);
+
+  const homeWithVideo = await (await fetch(baseUrl + "/api/home")).json();
+  assert.equal(homeWithVideo.hasVideo, true);
+
+  const removed = await fetch(baseUrl + "/api/media/video", {
+    method: "DELETE",
+    headers: { Origin: baseUrl, Cookie: cookie }
+  });
+  assert.equal(removed.status, 200);
+  assert.equal((await fetch(baseUrl + "/api/media/video")).status, 404);
+});
+
+test("server implementation and database files are not publicly served", async () => {
   const serverSource = await fetch(baseUrl + "/server.js");
   assert.equal(serverSource.status, 404);
-  const credentialFile = await fetch(baseUrl + "/.admin-credentials.json");
-  assert.equal(credentialFile.status, 404);
+  const databaseFile = await fetch(baseUrl + "/data/church.db");
+  assert.equal(databaseFile.status, 404);
   const loginPage = await fetch(baseUrl + "/admin.html");
   const loginMarkup = await loginPage.text();
   assert.equal(loginMarkup.includes("admin@example.com"), false);

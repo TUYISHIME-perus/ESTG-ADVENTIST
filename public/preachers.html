@@ -199,8 +199,6 @@
     </section>
     <script src="auth.js"></script>
     <script>
-        const storageKey = "morningProgramDashboard";
-
         if (!window.CampusAuth || !CampusAuth.requireSession()) {
             throw new Error("Authentication required.");
         }
@@ -213,28 +211,31 @@
         let programs = [];
 
         function loadPrograms() {
-            try {
-                const saved = localStorage.getItem(storageKey);
-                if (!saved) {
-                    programs = [];
+            fetch("/api/content", { credentials: "same-origin" })
+                .then(response => {
+                    if (response.status === 401) {
+                        window.location.assign("admin.html?returnTo=preachers.html");
+                        throw new Error("Authentication required.");
+                    }
+                    if (!response.ok) throw new Error("Unable to read dashboard data.");
+                    return response.json();
+                })
+                .then(dashboard => {
+                    const entries = dashboard && dashboard.data && Array.isArray(dashboard.data.worship)
+                        ? dashboard.data.worship
+                        : [];
+                    programs = entries.filter(program =>
+                        program && typeof program === "object" &&
+                        fields.every(field => typeof program[field] === "string")
+                    );
                     renderPrograms();
-                    return;
-                }
-                const dashboard = JSON.parse(saved);
-                const entries = dashboard && dashboard.data && Array.isArray(dashboard.data.worship)
-                    ? dashboard.data.worship
-                    : [];
-                programs = entries.filter(program =>
-                    program && typeof program === "object" &&
-                    fields.every(field => typeof program[field] === "string")
-                );
-                renderPrograms();
-            } catch (error) {
-                programs = [];
-                rows.replaceChildren();
-                message.className = "error";
-                message.textContent = "Unable to read saved worshipping programs. Check browser storage and dashboard data, then reload this page.";
-            }
+                })
+                .catch(error => {
+                    programs = [];
+                    rows.replaceChildren();
+                    message.className = "error";
+                    message.textContent = "Unable to read saved worshipping programs. Check the dashboard data and reload this page.";
+                });
         }
 
         function renderPrograms() {
@@ -266,9 +267,6 @@
 
         dateFilter.addEventListener("input", renderPrograms);
         preacherFilter.addEventListener("input", renderPrograms);
-        window.addEventListener("storage", event => {
-            if (event.key === storageKey || event.key === null) loadPrograms();
-        });
 
         loadPrograms();
     </script>

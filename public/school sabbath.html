@@ -237,7 +237,6 @@
         <p id="message" aria-live="polite">Loading Sabbath School programs...</p>
     </section>
     <script>
-        const storageKey = "morningProgramDashboard";
         const fields = ["leader", "prayerSong", "lastReport", "creatorSpeaker", "reporter", "choir", "date"];
         const rows = document.getElementById("program-rows");
         const message = document.getElementById("message");
@@ -251,61 +250,53 @@
         ];
         let programs = [];
 
-        function loadWeeklyStudies() {
-            try {
-                const saved = localStorage.getItem(storageKey);
-                const dashboard = saved ? JSON.parse(saved) : null;
-                const teachers = dashboard && Array.isArray(dashboard.weeklyStudies)
-                    ? dashboard.weeklyStudies
-                    : [];
-                weeklyTeachers.replaceChildren();
-                let hasTeachers = false;
-                teacherLabels.forEach((label, index) => {
-                    const teacher = typeof teachers[index] === "string" ? teachers[index].trim() : "";
-                    if (!teacher) return;
-                    hasTeachers = true;
-                    const item = document.createElement("div");
-                    const term = document.createElement("dt");
-                    const detail = document.createElement("dd");
-                    term.textContent = label;
-                    detail.textContent = teacher;
-                    item.append(term, detail);
-                    weeklyTeachers.appendChild(item);
-                });
-                weeklyStudiesMessage.className = "";
-                weeklyStudiesMessage.textContent = hasTeachers
-                    ? "Weekly study teachers"
-                    : "Weekly studies have not been added yet.";
-            } catch (error) {
-                weeklyTeachers.replaceChildren();
-                weeklyStudiesMessage.className = "error";
-                weeklyStudiesMessage.textContent = "Unable to read saved weekly studies. Reload this page after checking the dashboard data.";
-            }
+        function renderWeeklyStudies(teachers) {
+            weeklyTeachers.replaceChildren();
+            let hasTeachers = false;
+            teacherLabels.forEach((label, index) => {
+                const teacher = typeof teachers[index] === "string" ? teachers[index].trim() : "";
+                if (!teacher) return;
+                hasTeachers = true;
+                const item = document.createElement("div");
+                const term = document.createElement("dt");
+                const detail = document.createElement("dd");
+                term.textContent = label;
+                detail.textContent = teacher;
+                item.append(term, detail);
+                weeklyTeachers.appendChild(item);
+            });
+            weeklyStudiesMessage.className = "";
+            weeklyStudiesMessage.textContent = hasTeachers
+                ? "Weekly study teachers"
+                : "Weekly studies have not been added yet.";
         }
 
-        function loadPrograms() {
-            try {
-                const saved = localStorage.getItem(storageKey);
-                if (!saved) {
-                    programs = [];
+        function loadContent() {
+            fetch("/api/content", { credentials: "same-origin" })
+                .then(response => {
+                    if (!response.ok) throw new Error("Unable to read dashboard data.");
+                    return response.json();
+                })
+                .then(dashboard => {
+                    const entries = dashboard && dashboard.data && Array.isArray(dashboard.data.sabbath)
+                        ? dashboard.data.sabbath
+                        : [];
+                    programs = entries.filter(program =>
+                        program && typeof program === "object" &&
+                        fields.every(field => typeof program[field] === "string")
+                    );
                     renderPrograms();
-                    return;
-                }
-                const dashboard = JSON.parse(saved);
-                const entries = dashboard && dashboard.data && Array.isArray(dashboard.data.sabbath)
-                    ? dashboard.data.sabbath
-                    : [];
-                programs = entries.filter(program =>
-                    program && typeof program === "object" &&
-                    fields.every(field => typeof program[field] === "string")
-                );
-                renderPrograms();
-            } catch (error) {
-                programs = [];
-                rows.replaceChildren();
-                message.className = "error";
-                message.textContent = "Unable to read saved Sabbath School programs. Check browser storage and dashboard data, then reload this page.";
-            }
+                    renderWeeklyStudies(dashboard && Array.isArray(dashboard.weeklyStudies) ? dashboard.weeklyStudies : []);
+                })
+                .catch(error => {
+                    programs = [];
+                    rows.replaceChildren();
+                    message.className = "error";
+                    message.textContent = "Unable to read saved Sabbath School programs. Check the dashboard data and reload this page.";
+                    weeklyTeachers.replaceChildren();
+                    weeklyStudiesMessage.className = "error";
+                    weeklyStudiesMessage.textContent = "Unable to read saved weekly studies.";
+                });
         }
 
         function renderPrograms() {
@@ -337,15 +328,8 @@
 
         dateFilter.addEventListener("input", renderPrograms);
         speakerFilter.addEventListener("input", renderPrograms);
-        window.addEventListener("storage", event => {
-            if (event.key === storageKey || event.key === null) {
-                loadPrograms();
-                loadWeeklyStudies();
-            }
-        });
 
-        loadPrograms();
-        loadWeeklyStudies();
+        loadContent();
     </script>
 </body>
 </html>
