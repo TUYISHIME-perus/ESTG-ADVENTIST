@@ -223,10 +223,7 @@ function createAppServer(options = {}) {
     }
 
     if (method === "GET" && pathname === "/api/content") {
-      if (!sessionFor(request)) {
-        sendJson(response, 401, { error: "Sign in to view the dashboard data." });
-        return true;
-      }
+      // Allow public reading of the dashboard data.
       sendJson(response, 200, database.getContent() || {});
       return true;
     }
@@ -422,7 +419,8 @@ function createAppServer(options = {}) {
         if (error.code === "ENOENT" && path.basename(filePath) === "church-logo.jpg") {
           const jpeg = Buffer.from(
             // 1x1 white JPEG
-            "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDAREAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/AP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAQUC/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9k=",
+            "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf////////////////////////////////////////////////////////[...]"
+            ,
             "base64"
           );
           response.writeHead(200, {
