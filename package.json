@@ -2,28 +2,22 @@
   "name": "estg-sda-church-programs",
   "version": "1.0.0",
   "private": true,
-  "description": "A church programs website served by a small Node.js server that stores all content in a SQLite database (via the built-in `node:sqlite` module). Program entries, weekly studies, home page messages/photos/video and the admin password record are all persisted server-side.",
-  "homepage": "https://github.com/elyse237/adventist#readme",
-  "bugs": {
-    "url": "https://github.com/elyse237/adventist/issues"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/elyse237/adventist.git"
-  },
-  "license": "ISC",
-  "author": "",
+  "description": "ESTG SDA church programs website with a React frontend and the existing Node.js backend.",
   "type": "commonjs",
   "main": "server.js",
-  "directories": {
-    "test": "test"
-  },
   "scripts": {
     "start": "node server.js",
-    "dev": "node --env-file=.env server.js",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "node --env-file=.env server.js",
+    "dev:client": "npm --prefix client run dev -- --host 0.0.0.0",
+    "build": "npm --prefix client run build",
+    "preview": "npm --prefix client run preview -- --host 0.0.0.0",
     "test": "node --test"
   },
   "engines": {
     "node": ">=22.5.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.0"
   }
 }
